@@ -1,0 +1,137 @@
+name: Verify JPEG XL pinned Windows package
+on:
+  push:
+    branches: [ci-verify-jxl-pinned-vcpkg-20261125]
+permissions:
+  contents: read
+jobs:
+  windows_build:
+    name: vcpkg / ${{ matrix.triplet }} ${{ matrix.build_type || 'Release'}}
+    if: github.repository == 'ievav100/libjxl'
+    runs-on: ${{ matrix.runner || 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triplet: x64-windows-static
+            arch: '-A x64'
+            runner: windows-latest
+            build_type: Release
+            static: 'ON'
+            upload: 'ON'
+
+    env:
+      VCPKG_COMMIT: 74e6536215718009aae747d86d84b78376bf9e09 # 2025.10.17
+      VCPKG_ROOT: vcpkg
+      VCPKG_DISABLE_METRICS: 1
+      BUILD_TYPE: ${{ matrix.build_type || 'Release' }}
+      PREFIX: ${{matrix.triplet}}
+
+    steps:
+    - name: Harden Runner
+      uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      with:
+        egress-policy: audit
+
+    - name: Checkout the source
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        submodules: true
+        fetch-depth: 2
+        persist-credentials: false
+
+
+    - name: Download vcpkg
+      # wget doesn't seem to work under bash.
+      shell: 'powershell'
+      run: |
+        C:\msys64\usr\bin\wget.exe -nv `
+           https://github.com/microsoft/vcpkg/archive/${{ env.VCPKG_COMMIT }}.zip `
+          -O vcpkg.zip
+    - name: Bootstrap vcpkg
+      shell: 'bash'
+      run: |
+        set -x
+        unzip -q vcpkg.zip
+        rm -rf ${VCPKG_ROOT}
+        mv vcpkg-${VCPKG_COMMIT} ${VCPKG_ROOT}
+        ${VCPKG_ROOT}/bootstrap-vcpkg.sh
+
+    - name: Install libraries with vcpkg
+      shell: 'bash'
+      run: |
+        set -x
+        ${VCPKG_ROOT}/vcpkg --triplet ${{ matrix.triplet }} install \
+          giflib \
+          libjpeg-turbo \
+          libpng \
+          libwebp \
+          pkgconf \
+        #
+
+    - name: Configure
+      shell: 'bash'
+      run: |
+        set -x
+        mkdir build
+        cmake -Bbuild -H. ${{ matrix.arch }} -T ClangCL \
+          -DJPEGXL_STATIC=${{ matrix.static || 'ON'}} \
+          -DJPEGXL_ENABLE_TOOLS='ON' \
+          -DBUILD_TESTING=OFF \
+          -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
+          -DCMAKE_INSTALL_PREFIX=`pwd`/${PREFIX} \
+          -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
+          -DJPEGXL_ENABLE_OPENEXR=OFF \
+          -DJPEGXL_ENABLE_PLUGINS=OFF \
+          -DJPEGXL_ENABLE_TCMALLOC=OFF \
+          -DJPEGXL_ENABLE_VIEWERS=OFF \
+          -DJPEGXL_ENABLE_DEVTOOLS='ON' \
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+          -DX_VCPKG_APPLOCAL_DEPS_INSTALL=${{ matrix.static == 'OFF' && 'ON' || 'OFF' }} \
+        #
+    - name: Build
+      shell: 'bash'
+      run: |
+        set -x
+        cmake --build build --config ${BUILD_TYPE}
+    - name: Install
+      shell: 'bash'
+      run: |
+        set -x
+        cmake --build build --config ${BUILD_TYPE} --target install
+        mkdir ${PREFIX}/licenses
+        for pkg in giflib libjpeg-turbo libpng libwebp zlib; do
+          cp vcpkg/installed/${{matrix.triplet}}/share/${pkg}/copyright \
+            ${PREFIX}/licenses/LICENSE.${pkg}
+        done
+        cp third_party/sjpeg/COPYING ${PREFIX}/licenses/LICENSE.sjpeg
+        cp third_party/skcms/LICENSE ${PREFIX}/licenses/LICENSE.skcms
+        cp third_party/highway/LICENSE ${PREFIX}/licenses/LICENSE.highway
+        cp third_party/brotli/LICENSE ${PREFIX}/licenses/LICENSE.brotli
+        cp LICENSE ${PREFIX}/licenses/LICENSE.libjxl
+
+
+    - name: Package release
+      shell: 'bash'
+      if: matrix.upload != 'OFF'
+      run: |
+        7z -mx=9 -mfb=273 a jxl-${{matrix.triplet}}.7z ${PREFIX}/bin ${PREFIX}/include ${PREFIX}/lib ${PREFIX}/licenses
+        7z -mm=Deflate64 -mfb=257 -mpass=15 -mtp=2 a jxl-${{matrix.triplet}}.zip ${PREFIX}/bin ${PREFIX}/include ${PREFIX}/lib ${PREFIX}/licenses
+
+    - name: Upload ZIP release
+      if: matrix.upload != 'OFF'
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: jxl-${{matrix.triplet}}
+        path: |
+          jxl-${{matrix.triplet}}.zip
+        archive: false
+
+    - name: Upload 7Z release
+      if: matrix.upload != 'OFF'
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: jxl-${{matrix.triplet}}-7z
+        path: |
+          jxl-${{matrix.triplet}}.7z
+        archive: false
